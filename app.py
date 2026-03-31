@@ -23,7 +23,7 @@ NORMAL_PRESSURE = 120.0
 def run_simulator():
     BROKER = "mqtt-dashboard.com"
     TOPIC = "manufacturing/sensor/all_machines"
-    MACHINES = [f"M-{i:03}" for i in range(101, 111)]
+    MACHINES = [f"M-{i:03}" for i in range(101, 121)]
     
     # Track the life-cycle of each machine
     # States: 'STABLE', 'DECAYING', 'STOPPED'
