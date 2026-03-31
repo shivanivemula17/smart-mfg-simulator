@@ -4,124 +4,116 @@ import time
 import random
 import threading
 from datetime import datetime, timezone
-import os
 from flask import Flask
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Industrial Physics Engine is LIVE and Streaming!"
-
-# --- PHYSICS CONSTANTS ---
-ROOM_TEMP = 25.0
-MAX_HEALTHY_TEMP = 85.0
-CRITICAL_TEMP = 115.0
-NORMAL_RPM = 1500
-NORMAL_PRESSURE = 120.0
+    return "Industrial Physics Simulator (20 Machines) is LIVE!"
 
 def run_simulator():
     BROKER = "mqtt-dashboard.com"
     TOPIC = "manufacturing/sensor/all_machines"
-    MACHINES = [f"M-{i:03}" for i in range(101, 121)]
+    # Requirement 3: 20 Machines
+    MACHINES = [f"M-{i:03}" for i in range(101, 121)] 
     
-    # Track the life-cycle of each machine
-    # States: 'STABLE', 'DECAYING', 'STOPPED'
-    m_state = {}
+    # Internal State Tracking
+    machine_data = {}
     for m in MACHINES:
-        m_state[m] = {
-            "status": "RUNNING",
-            "internal_mode": "STABLE",
-            "temp": ROOM_TEMP,
-            "vib": 0.1,
-            "pres": NORMAL_PRESSURE,
+        machine_data[m] = {
+            "status": "Running",
+            "temp": 25.0,
             "rpm": 0,
-            "state_start": time.time(),
-            "min_run_time": 1800, # 30 minutes in seconds
-            "stop_duration": random.randint(180, 300) # 3-5 mins
+            "press": 0,
+            "vib": 0,
+            "state_timer": time.time(),
+            "target_duration": random.randint(1800, 2700), # 30-45 mins in seconds
+            "health_bias": random.uniform(0.9, 1.1) # Some machines run naturally hotter
         }
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.connect(BROKER, 1883)
 
-    while True:
-        current_time = time.time()
+    def update_physics(m_id):
+        m = machine_data[m_id]
+        now = time.time()
+        elapsed = now - m["state_timer"]
+
+        # --- 1. STATE SWITCHING LOGIC (Requirement 15, 16, 17, 18) ---
+        if m["status"] == "Running" and elapsed > m["target_duration"]:
+            m["status"] = "Stopped"
+            m["state_timer"] = now
+            m["target_duration"] = random.randint(300, 600) # 5-10 mins stop
         
-        for m_id in MACHINES:
-            s = m_state[m_id]
-            elapsed = current_time - s["state_start"]
+        elif m["status"] == "Stopped" and elapsed > m["target_duration"]:
+            m["status"] = "Running"
+            m["state_timer"] = now
+            m["target_duration"] = random.randint(1800, 2700) # 30-45 mins run
 
-            # --- 1. STATE TRANSITION LOGIC (The Rhythm) ---
-            
-            # If machine is RUNNING and STABLE
-            if s["status"] == "RUNNING" and s["internal_mode"] == "STABLE":
-                # Ramp up RPM and Temp if just started
-                s["rpm"] += (NORMAL_RPM - s["rpm"]) * 0.2
-                s["temp"] += (MAX_HEALTHY_TEMP - s["temp"]) * 0.05
-                s["vib"] += (0.3 - s["vib"]) * 0.1
-                
-                # After 30 mins, check if we should start decaying (Requirement 18, 19)
-                if elapsed > s["min_run_time"]:
-                    if random.random() < 0.01: # Small chance to start failing
-                        s["internal_mode"] = "DECAYING"
-                        s["state_start"] = current_time
+        # --- 2. PHYSICS RAMPING (Requirement 12, 13, 14, 20) ---
+        if m["status"] == "Running":
+            # RPM Ramps up to 1500
+            m["rpm"] += (1500 - m["rpm"]) * 0.1 
+            # Temp Ramps up to 85.5
+            target_t = 85.5 * m["health_bias"]
+            m["temp"] += (target_t - m["temp"]) * 0.02
+            # Pressure follows RPM
+            m["press"] += (120.3 - m["press"]) * 0.1
+            # Vibration has a "running rhythm"
+            m["vib"] = 0.32 + (random.uniform(-0.05, 0.05))
+        else:
+            # STOPPED: Slow wind down (Requirement 18, 20)
+            m["rpm"] += (0 - m["rpm"]) * 0.1
+            m["press"] += (0 - m["press"]) * 0.1
+            # Temp cools slowly toward room temp (25°C)
+            m["temp"] += (25.0 - m["temp"]) * 0.01
+            m["vib"] += (0 - m["vib"]) * 0.1
 
-            # If machine is in GRADUAL DECAY (Requirement 16, 19, 21)
-            elif s["internal_mode"] == "DECAYING":
-                # Values change slowly but dangerously
-                s["temp"] += 0.5  # Getting hotter
-                s["vib"] += 0.02  # Shaking more
-                s["pres"] -= 0.1  # Losing pressure
-                s["rpm"] -= 2     # Slowing down
-                
-                # Once temp hits critical or 10 mins pass, STOP the machine
-                if s["temp"] >= CRITICAL_TEMP or (current_time - s["state_start"]) > 600:
-                    s["status"] = "STOPPED"
-                    s["internal_mode"] = "STOPPED"
-                    s["state_start"] = current_time
-                    s["stop_duration"] = random.randint(180, 300)
+        # Add small rhythm/noise to values
+        cur_temp = round(m["temp"] + random.uniform(-0.2, 0.2), 2)
+        cur_vib = round(max(0, m["vib"] + random.uniform(-0.02, 0.02)), 3)
+        cur_pres = round(max(0, m["press"] + random.uniform(-0.5, 0.5)), 1)
+        cur_rpm = int(m["rpm"] + random.randint(-5, 5))
 
-            # If machine is STOPPED (Requirement 17)
-            elif s["status"] == "STOPPED":
-                s["rpm"] += (0 - s["rpm"]) * 0.3
-                s["temp"] += (ROOM_TEMP - s["temp"]) * 0.02 # Cool down slowly
-                s["pres"] += (0 - s["pres"]) * 0.2
-                s["vib"] += (0 - s["vib"]) * 0.3
-                
-                # After 3-5 mins, Restart
-                if elapsed > s["stop_duration"]:
-                    s["status"] = "RUNNING"
-                    s["internal_mode"] = "STABLE"
-                    s["state_start"] = current_time
+        # --- 3. OUTLIERS & MISSING VALUES (Requirement 9, 10) ---
+        # 5% Outliers
+        is_outlier = random.random() < 0.05
+        if is_outlier:
+            cur_temp = 500.0 if random.random() > 0.5 else -50.0
+            cur_rpm = 9999
 
-            # --- 2. DATA INJECTION (Outliers & Missing Values) ---
-            
-            # Requirement 1: Base JSON
-            data = {
-                "machine_id": m_id,
-                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "temperature": round(s["temp"], 2),
-                "vibration": round(s["vib"], 2),
-                "pressure": round(s["pres"], 2),
-                "rpm": int(s["rpm"]),
-                "status": s["status"]
-            }
+        payload = {
+            "machine_id": m_id,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "temperature": cur_temp,
+            "vibration": cur_vib,
+            "pressure": cur_pres,
+            "rpm": cur_rpm,
+            "status": m["status"]
+        }
 
-            # Requirement 10: 5% Outliers (Sensor Glitches)
-            if random.random() < 0.05:
-                data["temperature"] = 999.9 if random.random() > 0.5 else -50.0
+        # 5% Missing Values (Remove one key)
+        if random.random() < 0.05:
+            key_to_del = random.choice(["temperature", "vibration", "pressure", "rpm"])
+            del payload[key_to_del]
 
-            # Requirement 11: 5% Missing Values
-            if random.random() < 0.05:
-                key_to_del = random.choice(["temperature", "vibration", "pressure", "rpm"])
-                del data[key_to_del]
+        return payload
 
-            client.publish(TOPIC, json.dumps(data))
+    while True:
+        try:
+            for m_id in MACHINES:
+                data = update_physics(m_id)
+                client.publish(TOPIC, json.dumps(data))
+            time.sleep(5) # Batch every 5 seconds
+        except Exception as e:
+            print(f"Error: {e}")
+            time.sleep(10)
 
-        time.sleep(5) # 5 second interval for stability
-
+# Start in background
 threading.Thread(target=run_simulator, daemon=True).start()
 
 if __name__ == "__main__":
+    import os
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
