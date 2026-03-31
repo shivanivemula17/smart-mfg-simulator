@@ -11,110 +11,109 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Industrial Physics Simulator (v2) is LIVE."
+    return "Industrial Physics Simulator (10 Machines) is ACTIVE"
 
-def run_simulator():
-    BROKER = "mqtt-dashboard.com"
-    TOPIC = "manufacturing/sensor/all_machines"
-    # Requirement 3: 10 Machines
-    MACHINES = [f"M-{i:03}" for i in range(101, 111)]
-    
-    # Configuration for "Machine Nature"
-    # States: RUNNING, STOPPING, STOPPED, STARTING
-    states = {}
-    for m in MACHINES:
-        states[m] = {
-            "status": "RUNNING",
-            "temp": 25.0,
-            "vib": 0.2,
-            "press": 120.0,
-            "rpm": 1500,
-            "timer": time.time() + random.randint(1800, 3600), # Req 18: At least 30 mins
-            "health_degradation": 0 # 0 to 1, increases before failure
-        }
+# --- SIMULATOR CONFIG ---
+BROKER = "mqtt-dashboard.com"
+TOPIC = "manufacturing/sensor/all_machines"
+MACHINES = [f"M-{i:03}" for i in range(101, 111)]
 
+# Internal state memory for 10 machines
+# States: 'IDLE', 'STARTING', 'HEALTHY', 'DEGRADING', 'STOPPING'
+m_data = {}
+for m in MACHINES:
+    m_data[m] = {
+        "state": "IDLE",
+        "temp": 25.0,
+        "rpm": 0,
+        "vib": 0.01,
+        "press": 1.0,
+        "timer": random.randint(180, 300), # 3-5 mins in seconds
+        "total_run_time": 0
+    }
+
+def run_physics_engine():
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.connect(BROKER, 1883)
 
     while True:
-        now = time.time()
-        
-        for m_id in MACHINES:
-            s = states[m_id]
+        for m in MACHINES:
+            s = m_data[m]
             
-            # --- STATE TRANSITION LOGIC (The Rhythm) ---
-            
-            if s["status"] == "RUNNING":
-                # If 30+ mins passed, 10% chance to start degrading
-                if now > s["timer"] and random.random() < 0.01:
-                    s["status"] = "WARNING"
-                    s["timer"] = now + 300 # 5 mins of warning before stop
-                
-                # Normal Physics
-                target_temp = 82.0 + (s["health_degradation"] * 30)
-                s["temp"] += (target_temp - s["temp"]) * 0.05 # Gradual rise
-                s["vib"] = 0.25 + (s["health_degradation"] * 0.8) + random.uniform(-0.02, 0.02)
-                s["rpm"] = 1500 + random.randint(-5, 5)
-                s["press"] = 120.0 + random.uniform(-1, 1)
+            # --- STATE MACHINE LOGIC ---
+            if s["state"] == "IDLE":
+                s["timer"] -= 5
+                if s["timer"] <= 0:
+                    s["state"] = "STARTING"
+                    s["timer"] = 60 # 1 min startup
 
-            elif s["status"] == "WARNING":
-                # Values start changing "slowly" before stopping (Req 19)
-                s["health_degradation"] += 0.01
-                s["temp"] += 0.5
-                s["vib"] += 0.05
-                if now > s["timer"]:
-                    s["status"] = "STOPPED"
-                    s["timer"] = now + random.randint(180, 300) # Req 17: 3-5 mins stop
-
-            elif s["status"] == "STOPPED":
-                # Cool down physics
-                s["temp"] += (25.0 - s["temp"]) * 0.02 # Slow cooling
-                s["vib"] += (0.01 - s["vib"]) * 0.1
-                s["press"] += (0.0 - s["press"]) * 0.1
-                s["rpm"] = 0
-                if now > s["timer"]:
-                    s["status"] = "STARTING"
-                    s["timer"] = now + 60 # 1 min to warm up
-
-            elif s["status"] == "STARTING":
-                s["rpm"] = 1500
-                s["press"] = 120.0
+            elif s["state"] == "STARTING":
+                s["rpm"] += 150 # Slow ramp up
+                s["press"] += 12
                 s["temp"] += 2.0
-                if s["temp"] > 60: # Once warm enough, set to running
-                    s["status"] = "RUNNING"
-                    s["health_degradation"] = 0
-                    s["timer"] = now + 1800 # Req 18: Reset 30 min timer
+                s["timer"] -= 5
+                if s["rpm"] >= 1500:
+                    s["state"] = "HEALTHY"
+                    s["timer"] = random.randint(1800, 2400) # At least 30-40 mins
 
-            # --- DATA ANOMALIES (Req 10 & 11) ---
-            
-            # Construct Base JSON (Req 1 & 2)
-            display_status = "RUNNING" if s["status"] in ["RUNNING", "WARNING", "STARTING"] else "STOPPED"
-            
+            elif s["state"] == "HEALTHY":
+                # Jitter values slightly for realism
+                s["rpm"] = random.randint(1490, 1510)
+                s["temp"] += (80 - s["temp"]) * 0.05
+                s["vib"] = round(random.uniform(0.2, 0.35), 2)
+                s["press"] = round(random.uniform(118, 122), 2)
+                s["timer"] -= 5
+                if s["timer"] <= 0:
+                    s["state"] = "DEGRADING"
+                    s["timer"] = 300 # 5 min degradation
+
+            elif s["state"] == "DEGRADING":
+                s["vib"] += 0.05 # Vibration climbs
+                s["temp"] += 1.5 # Getting hot
+                s["rpm"] -= 20   # Losing power
+                s["timer"] -= 5
+                if s["timer"] <= 0 or s["temp"] > 115:
+                    s["state"] = "STOPPING"
+                    s["timer"] = 60
+
+            elif s["state"] == "STOPPING":
+                s["rpm"] = max(0, s["rpm"] - 200)
+                s["press"] = max(1, s["press"] - 20)
+                s["temp"] -= 1.0 # Cooling
+                s["timer"] -= 5
+                if s["rpm"] == 0:
+                    s["state"] = "IDLE"
+                    s["timer"] = random.randint(180, 300) # 3-5 min stop
+
+            # --- MAP INTERNAL STATES TO EXTERNAL STATUS (Requirement 20) ---
+            ext_status = "STOPPED" if s["state"] == "IDLE" else "RUNNING"
+
+            # --- CONSTRUCT PAYLOAD (Requirement 1) ---
             payload = {
-                "machine_id": m_id,
+                "machine_id": m,
                 "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "temperature": round(s["temp"], 2),
                 "vibration": round(s["vib"], 2),
                 "pressure": round(s["press"], 2),
-                "rpm": s["rpm"],
-                "status": display_status
+                "rpm": int(s["rpm"]),
+                "status": ext_status
             }
 
-            # 5% Outliers (Req 10)
+            # --- 5% OUTLIERS (Requirement 10) ---
             if random.random() < 0.05:
-                payload["temperature"] = 999.9 if random.random() < 0.5 else -50.0
-            
-            # 5% Missing Values (Req 11)
-            if random.random() < 0.05:
-                del payload[random.choice(["vibration", "pressure", "rpm"])]
+                payload["temperature"] = 999.9 if random.random() > 0.5 else -50.0
 
-            # Publish
+            # --- 5% MISSING VALUES (Requirement 11) ---
+            if random.random() < 0.05:
+                key_to_del = random.choice(["vibration", "pressure", "rpm"])
+                del payload[key_to_del]
+
             client.publish(TOPIC, json.dumps(payload))
+        
+        time.sleep(5) # The "Heartbeat" every 5 seconds
 
-        time.sleep(5)
-
-# Deploy
-threading.Thread(target=run_simulator, daemon=True).start()
+# Start simulation in separate thread
+threading.Thread(target=run_physics_engine, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
